@@ -1,0 +1,299 @@
+---
+title: "The Tidyverse in a Table"
+author: "Rasmus Bååth, rasmus.baath@gmail.com, <a href='https://twitter.com/rabaath'>@rabaath</a>"
+date: "10/24/2020"
+output: html_document
+---
+
+*This is a submission to the [2020 RStudio Table Contest](https://blog.rstudio.com/2020/09/15/announcing-the-2020-rstudio-table-contest/) in the Tutorials for interactive-HTML tables category.*
+
+```{css, echo=FALSE}
+.has-feedback .form-control {
+    padding-right: 0px;
+}
+.main-container {
+    max-width: 1040px;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  rows.print=6)
+```
+
+Some tables are beautiful. And yes, I'm talking about the stats-and-numbers kind of tables and not the ones you get at IKEA. Some tables show carefully selected statistics, with headers in bold and spacious yet austere design; the numbers rounded to just the right number of decimal places. 
+
+But here we're not going to make a beautiful table, instead we're making a *useful table*. In this tutorial, I'm going show you how to take all the documentation, for all the functions in [the `tidyverse` core packages](https://www.tidyverse.org/packages/#core-tidyverse), and condense it into one single table. Why is this useful? As we're going to use the excellent [DT package](https://rstudio.github.io/DT/) the result is going to be an interactive table that makes it easy to search, sort, and explore the functions of the tidyverse.
+
+Actually, let's start with the finished table, and then I'll show you how it's made. Try it out below, for example, find all functions that take a `pattern` argument or find all `ggplot2` functions with `line` in the name!
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+source("tidyverse_in_a_table.R")
+tidyverse_in_a_table
+rm(list=ls())
+```
+
+Making the table above is a two-step affair, where both steps are somewhat tricky:
+
+1. **Take the documentation for all the tidyverse packages and put it into a tidy data frame.** This is going to be tricky because parsing untidy data into a data frame is often messy and we will have to use undocumented functions from the `tools` package to parse the R documentation (Rd) files.
+2. **Format the documentation data frame and make it into a pretty DT table.** This is going to be tricky because to format and customize the table using DT we will have to write both some HTML and some javascript (!).
+
+Putting the tidyverse documentation into a data frame
+-----------------------------------------
+
+Let's load the packages we're going to need: [`DT`](https://rstudio.github.io/DT/) to make the final table, [`glue`](https://glue.tidyverse.org/) to easily "glue" complex strings together, and, of course, [`tidyverse`]() which we'll use for processing data, but that's also where the documentation lives that we're going to extract!
+
+```{r message=FALSE, warning=FALSE}
+library(DT)
+library(glue)
+library(tidyverse)
+```
+
+The tidyverse contains many different packages, but here we're going to use only the *core* tidyverse packages.
+
+```{r}
+package_names <- tidyverse:::core
+package_names
+```
+
+We're being a bit *reckless* here because we're using `:::` a.k.a. the _triple colon operator_. A close cousin to the _double colon operator_ (`::`), the `:::`-operator also plucks out a function or value from within a package, but `:::` is the _cousin dangereux_! While `::` allows you to pluck out exported functions, functions the package author has marked as being dependable and useful, `:::` allows you to pluck out _any_ obscure, undocumented, and possibly unreliable function. In general, it's not good practice to use `:::`, but in practice it's generally OK when getting from A to B is more important than reliability down the line. We will find a use for `:::` again. 
+
+By loading the `tidyverse` we've also loaded all core packages and we can now extract the function names and arguments from these. We'll use 
+
+* `lsf.str("package:A_PACKAGE_NAME")` to extract a list of all function names in the given package.
+* `str(get("A_FUNCTION_NAME"))` to get the arguments for each function. As `str()` doesn't return anything (it directly *prints* the arguments) we need to `capture.output` to get it back as a string.
+* `map_dfr` to loop over all the core packages in `package_names`, create a data frame for each, and row bind them together.
+
+```{r}
+tidyverse_functions <- map_dfr(package_names, function(package_name) {
+  tibble(
+    Package = package_name,
+    Function = as.character(lsf.str(glue("package:{Package}"))),
+    Arguments = map_chr(Function, function(function_name) {
+      capture.output(str(get(function_name))) %>% 
+        str_squish() %>% 
+        str_c(collapse = " ") %>% 
+        str_remove("^function ")
+    })
+  ) 
+})
+```
+
+We now have a data frame of all `r scales::comma(nrow(tidyverse_functions))` exported functions (+ some other values) in the tidyverse!
+
+```{r}
+tidyverse_functions
+```
+What's missing is the actual documentation. We can get a parsed version of the documentation for any installed package by using the `tools::Rd_db()` function. This gives us the documentation as a deeply nested list structure, which is better than having to work with the raw `Rd`-files, but it's still tedious to figure out how to pick out the parts we want. Good news: The `tools` package has many functions that help with this. Bad news: They are all hidden away as non-exported functions (some are even "doubly" hidden by having function names starting with `.`). Good news, again: We know about the `:::`-operator and are renegades enough to use it!    
+
+```{r}
+# plucking out non-exported Rd helper functions from the tools package
+Rd_get_metadata <- tools:::.Rd_get_metadata
+Rd_contents <- tools:::Rd_contents
+Rd_get_example_code <- tools:::.Rd_get_example_code
+Rd_get_section <- tools:::.Rd_get_section
+Rd_get_text <- tools:::.Rd_get_text
+
+# Extracts the text of the named section from the rd_doc
+Rd_get_section_text <- function(rd_doc, section) {
+  Rd_get_section(rd_doc, section) %>% 
+    Rd_get_text() %>% 
+    discard(~ .x == "")
+}
+```
+
+Now comes a slightly messy section where we will, again, use `map_dfr` to loop over all the core packages, create a data frame (this time with extracted documentation), and row bind it all together.
+
+```{r}
+rd_info <- map_dfr(package_names, function(package_name) {
+  # A list with the parsed package documentation
+  rd_list <- tools::Rd_db(package_name)
+  rd_list %>% 
+    # Turn the documentation contents into a data frame, one doc page per row.
+    Rd_contents() %>% 
+    as_tibble() %>% 
+    # Remove all documentation of datasets and "internal" functions. 
+    # We need to use map_lgl here as Keywords is a list of character vectors.
+    filter(map_lgl(Keywords, 
+      ~ length(.x) == 0 || ! .x %in% c("datasets", "internal")
+    )) %>%
+    select(File, Name, Title, Aliases, Keywords) %>% 
+    mutate(Package = package_name) %>% 
+    # For each row/doc page we're going to extract some information
+    rowwise() %>% 
+    mutate(
+      rd_doc = list(rd_list[[File]]),
+      # The function examples. We're using the paste0("", x) trick as x might
+      # be a 0-length vector, but we still want to get back an empty (1-length)
+      # character vector.
+      Examples = str_trim(paste0("", Rd_get_example_code(rd_doc))),
+      Description = paste(Rd_get_section_text(rd_doc, "description"), collapse = " "),
+      # A single doc page can document many function we here make a list of
+      #  all functions documented by the doc page.
+      names_and_aliases = list(unique(c(Name, Aliases)))
+    ) %>%
+    # A page can document many functions and this unnest will get us one row
+    # per function instead of one row per doc page. All row values, except
+    # those in names_and_aliases, will be duplicated.
+    unnest(names_and_aliases)
+})
+```
+
+We now have one data frame listing all tidyverse functions and their arguments (`tidyverse_functions`) and one data frame with extracted documentation (`rd_info`). Now we can join these two data frames together using an `inner_join` which will concatenate all rows with the same package and function name. Using `inner_join` also has the added benefit of _removing_ all functions that do not occur in both data frames which removes undocumented functions and documentation on non-functions. 
+
+```{r}
+tidyverse_functions_info <- inner_join(
+  tidyverse_functions, rd_info,
+  by = c("Package" = "Package", "Function" = "names_and_aliases")
+)
+```
+
+Here's the final data frame with info on all the `r scales::comma(nrow(tidyverse_functions_info))` documented functions in the core tidyverse.
+
+
+```{r}
+tidyverse_functions_info
+```
+So, we have a data frame with all the information, but we still need to turn this into a useful table we can easily search, filter, and skim.
+
+
+Formatting the documentation and turn it into a DT table
+-----------------------------------------
+
+The [DT package](https://rstudio.github.io/DT/) by [Yihui Xie](https://yihui.org/) is an amazing package that wraps the [DataTables](https://datatables.net/) javascript library. It allows you to quickly turn any data frame into an interactive, sortable, and searchable HTML table that can be included in Rmarkdown documents and shiny apps. To turn the data frame `tidyverse_functions_info` into a DataTable we just `select` the columns we want and then we feed it to the `datatable` function: 
+
+```{r}
+tidyverse_functions_info %>% 
+  select(Package, Function, Arguments, Title, Description) %>% 
+  # Show a datatable with five visible rows
+  datatable(options = list(pageLength = 5))
+```
+
+And that's it. All the tidyverse documentation in a table! But wouldn't it be nice if the function names were set in `a monospaced font`? And maybe we could have individual search for each column? And wouldn't it be nifty if you could click on the function and get to the official documentation? We can do all that, and more, with `DT`, but the price we pay is that we have to write some HTML and javascript.
+
+By setting `escape = FALSE` when creating a datatable all HTML in the table cells will be rendered. So, let's add some HTML markup and links to our table.
+
+```{r}
+formatted_functions_info <- tidyverse_functions_info %>%
+  mutate(
+    # The package and function name links to the tidyverse.org documentation
+    Function = glue(
+      "<a href='https://{Package}.tidyverse.org/reference/{Name}.html'>{Function}</a>"
+    ),
+    Package = glue("<a href='https://{Package}.tidyverse.org/'>{Package}</a>"),
+    # Let's replace all space in the arguments with non-breaking space (&nbsp;)
+    # except after a comma, so that text only wraps between arguments.
+    Arguments = str_replace_all(Arguments, "(?<!,) " , "&nbsp;"),
+    # Join the Title and Description, and format the examples
+    Description = glue("<b>{Title}</b><br>{Description}"),
+    Examples = glue("<b>Examples</b><pre><code>{Examples}</pre></code>"),
+    # A mystery column consisting only of pluses (&oplus;).
+    # Read on for the explanation!
+    " " = '&oplus;'
+  ) %>%
+  select(Package, Function, Arguments, Description,  Examples, ` `)
+```
+
+If we make a new datatable out of this we can see the formatting in action. But we also see some problems: The examples and description don't really fit, and what is the weird (+) doing there?
+
+```{r}
+datatable(
+  formatted_functions_info, 
+  escape = FALSE, 
+  # The rows are so tall that we have to show just 1 row at a time...
+  options = list(pageLength = 1)
+)
+```
+
+Since a datatable runs on HTML and javascript it's possible to make it do *anything* as long as we're ready to write some javascript and add it as a *callback*: A piece of code that runs once a datatable has loaded. By modifying the code from [this guide](https://rstudio.github.io/DT/002-rowdetails.html) I ended up with a (somewhat impenetrable, but working) javascript callback where
+
+* A function is defined that triggers when we `'click'` in the column with the HTML class `details-control`. That's going to be the column with the (+).
+* This function shows or hides a `row.child`: An extra row under the row we clicked on.
+* What is shown in that row is what the `format` function pastes together: The content in column 5 (`d[4]`, `4` because javascript starts counting items from `0`) plus the content in column 6 (`d[5]`). That is, the `Description` plus the `Examples`.
+
+
+```{r}
+datatable_callback <- JS("
+  var format = function(d) {
+    return '<div style=\"padding: .5em;\">' +
+           '<p>' + d[4] + '</p>' +
+           '<p>' + d[5] + '</p>' + 
+           '</div>';
+  };
+  table.on('click', 'td.details-control', function() {
+    var td = $(this), row = table.row(td.closest('tr'));
+    if (row.child.isShown()) {
+      row.child.hide();
+      td.html('&oplus;');
+    } else {
+      row.child(format(row.data())).show();
+      td.html('&CircleMinus;');
+    }
+  });"
+)
+```
+
+Now we're ready to make the final formatted table. What's left is to set a couple of more `datatable` options to customize our table, commented inline below.
+
+```{r}
+tidyverse_in_a_table <- 
+  datatable(
+    formatted_functions_info, 
+    # Render HTML in the table
+    escape = FALSE, 
+    # Add search boxes for each column at the "top" of the table
+    filter = "top",  
+    # Register the javascript code we wrote above as a callback
+    callback = datatable_callback,
+    # To shorten the descriptions we're going to use the datatable ellipsis 
+    # plugin which adds ... when the text in a cell is too long.
+    plugins = "ellipsis",
+    options =  list(
+      # Show 5 rows by default
+      pageLength = 5,
+      # But it will be possible to show up to a 100 rows!
+      lengthMenu = c(5, 10, 20, 100),
+      # Some column specific settings
+      columnDefs = list(
+        # column 0 (row numbers) and 6 (Examples) are hidden
+        list(visible = FALSE, targets = c(0, 5)),
+        # The special column with (+) gets the details-control class so that it
+        # triggers the callback code
+        list(orderable = FALSE, className = 'details-control', targets = 6),
+        # Adds an ellipsis (...) when the Description (in column 4) is 
+        # longer than 300 characters  
+        list(render = JS("$.fn.dataTable.render.ellipsis(300, true)"), targets = 4)
+      )
+    )
+  ) %>% 
+  # Column specific formatting
+  formatStyle("Package", `vertical-align` = "top", `font-family` =  "monospace") %>%
+  formatStyle("Function", `vertical-align` = "top", `font-family` =  "monospace") %>%
+  formatStyle("Arguments", `vertical-align` = "top", `font-family` =  "monospace") %>% 
+  formatStyle("Description", `vertical-align` = "top") %>% 
+  formatStyle(6, `font-size` = "20px", cursor = "pointer")
+```
+
+OK, so now we've made the final table with the following features:
+
+* It includes **all** the tidyverse core packages documentation.
+* It can be sorted and searched, both globally and per column.
+* Function names link to the original [tidyverse.org](https://www.tidyverse.org/) documentation.
+* It shows all the function arguments and a 300 character excerpt of the description.
+* If you click on the (+) you get a longer description and all the examples.
+
+Here it is again:
+
+```{r}
+tidyverse_in_a_table
+```
+This table could now be included as part of an Rmarkdown document, or you can export it as a self-contained HTML-file like this:
+
+```{r}
+DT::saveWidget(tidyverse_in_a_table, "tidyverse_in_a_table.html")
+```
+
+Here's [a link to the full code](https://github.com/rasmusab/tidyverse-in-a-table) to generate the final table. And while this tutorial showed you how to turn the tidyverse docs into a table, it should be easy to tweak the code to work for any R-package.
+
+Thank you for reading through this tutorial, a huge thanks to [Yihui Xie](https://yihui.org/) for the `DT` package, and a shout-out to Michael Chow for [the tweet](https://twitter.com/chowthedog/status/1266047853836763137) that inspired me to put the tidyverse docs in a table!
