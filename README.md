@@ -11,3 +11,7 @@ docker run --rm \
 rocker/tidyverse:4.0.3 \
 Rscript -e 'install.packages("DT"); rmarkdown::render("tidyverse_in_a_table.Rmd")'
 ```
+
+Here's a screenshot of the rendered table:
+
+![](tidyverse_in_a_table_screenshot.png?raw=true)
